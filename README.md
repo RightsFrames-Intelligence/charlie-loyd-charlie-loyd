@@ -48,3 +48,7 @@ Override the target path:
 - The script verifies copied file sizes after each push.
 - The default device serial is pinned in the script and can be overridden at runtime.
 - This repo is currently in a bootstrap state and will expand as Charlie 2.0 grows.
+
+## License
+
+Licensed under Apache-2.0. See `LICENSE`.
