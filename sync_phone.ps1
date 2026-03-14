@@ -11,11 +11,21 @@ $ErrorActionPreference = 'Stop'
 
 function Invoke-Adb {
     param(
+        [switch]$IgnoreExitCode,
         [Parameter(ValueFromRemainingArguments = $true)]
         [string[]]$Arguments
     )
 
-    & adb @Arguments
+    $global:LASTEXITCODE = 0
+    $output = & adb @Arguments
+    $exitCode = $LASTEXITCODE
+
+    if (-not $IgnoreExitCode -and $exitCode -ne 0) {
+        $commandLine = @('adb') + $Arguments
+        throw "adb exited with code ${exitCode}: $($commandLine -join ' ')"
+    }
+
+    return $output
 }
 
 function Test-AdbDevice {
@@ -52,7 +62,7 @@ function Get-RemoteStatValue {
     )
 
     foreach ($command in $commands) {
-        $value = (Invoke-Adb -s $Serial shell $command 2>$null | Out-String).Trim()
+        $value = (Invoke-Adb -IgnoreExitCode -s $Serial shell $command 2>$null | Out-String).Trim()
         if ($value) {
             return $value
         }
@@ -126,102 +136,133 @@ function Get-RemoteDirectory {
     return $RemoteFile.Substring(0, $lastSlash)
 }
 
-Test-AdbDevice -Serial $PinnedSerial
+function Get-SyncCandidates {
+    param(
+        [string]$Serial,
+        [string]$LocalRoot,
+        [string]$RemoteRoot
+    )
 
-if (-not (Test-Path -LiteralPath $LocalPath)) {
-    throw "LocalPath not found: $LocalPath"
+    $files = Get-ChildItem -LiteralPath $LocalRoot -File -Recurse -ErrorAction Stop |
+        Where-Object { $_.FullName -notmatch '[\\/]\.git([\\/]|$)' }
+
+    $results = foreach ($file in $files) {
+        $mapping = Get-RelativeRemoteFile -LocalRoot $LocalRoot -File $file -RemoteRoot $RemoteRoot
+        $localEpoch = [DateTimeOffset]::new($file.LastWriteTimeUtc).ToUnixTimeSeconds()
+        $remoteEpoch = Get-RemoteMTime -Serial $Serial -RemoteFile $mapping.RemoteFile
+
+        $status = if ($null -eq $remoteEpoch) {
+            'MissingRemote'
+        }
+        elseif ($localEpoch -gt $remoteEpoch) {
+            'LocalNewer'
+        }
+        else {
+            'RemoteUpToDate'
+        }
+
+        [pscustomobject]@{
+            Status = $status
+            SizeBytes = $file.Length
+            SizeMB = [math]::Round($file.Length / 1MB, 2)
+            LocalUtc = $file.LastWriteTimeUtc
+            RelativePath = $mapping.RelativePath
+            RemoteFile = $mapping.RemoteFile
+            LocalFile = $file.FullName
+        }
+    }
+
+    return $results
 }
 
-$localRoot = (Resolve-Path -LiteralPath $LocalPath).Path.TrimEnd('\', '/')
-$remoteRoot = $RemotePath.TrimEnd('/')
+function Invoke-SyncPhone {
+    param(
+        [string]$Serial,
+        [string]$SourcePath,
+        [string]$DestinationPath,
+        [int]$PreviewListFirst,
+        [int]$PreviewTopLargest,
+        [bool]$IsPreview
+    )
 
-$files = Get-ChildItem -LiteralPath $localRoot -File -Recurse -ErrorAction Stop |
-    Where-Object { $_.FullName -notmatch '[\\/]\.git([\\/]|$)' }
+    Test-AdbDevice -Serial $Serial
 
-$results = foreach ($file in $files) {
-    $mapping = Get-RelativeRemoteFile -LocalRoot $localRoot -File $file -RemoteRoot $remoteRoot
-    $localEpoch = [DateTimeOffset]::new($file.LastWriteTimeUtc).ToUnixTimeSeconds()
-    $remoteEpoch = Get-RemoteMTime -Serial $PinnedSerial -RemoteFile $mapping.RemoteFile
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        throw "LocalPath not found: $SourcePath"
+    }
 
-    $status = if ($null -eq $remoteEpoch) {
-        'MissingRemote'
-    }
-    elseif ($localEpoch -gt $remoteEpoch) {
-        'LocalNewer'
-    }
-    else {
-        'RemoteUpToDate'
-    }
+    $localRoot = (Resolve-Path -LiteralPath $SourcePath).Path.TrimEnd('\', '/')
+    $remoteRoot = $DestinationPath.TrimEnd('/')
+    $results = @(Get-SyncCandidates -Serial $Serial -LocalRoot $localRoot -RemoteRoot $remoteRoot)
+    $missing = @($results | Where-Object Status -eq 'MissingRemote')
+    $newer = @($results | Where-Object Status -eq 'LocalNewer')
+    $upToDate = @($results | Where-Object Status -eq 'RemoteUpToDate')
+    $needed = @($results | Where-Object Status -ne 'RemoteUpToDate')
 
     [pscustomobject]@{
-        Status = $status
-        SizeBytes = $file.Length
-        SizeMB = [math]::Round($file.Length / 1MB, 2)
-        LocalUtc = $file.LastWriteTimeUtc
-        RelativePath = $mapping.RelativePath
-        RemoteFile = $mapping.RemoteFile
-        LocalFile = $file.FullName
-    }
-}
+        LocalRoot = $localRoot
+        RemoteRoot = $remoteRoot
+        TotalLocalFiles = $results.Count
+        MissingRemote = $missing.Count
+        LocalNewer = $newer.Count
+        RemoteUpToDate = $upToDate.Count
+        NeedsCopyTotal = $needed.Count
+        Preview = $IsPreview
+    } | Format-List
 
-$missing = @($results | Where-Object Status -eq 'MissingRemote')
-$newer = @($results | Where-Object Status -eq 'LocalNewer')
-$upToDate = @($results | Where-Object Status -eq 'RemoteUpToDate')
-$needed = @($results | Where-Object Status -ne 'RemoteUpToDate')
+    ""
+    "FIRST $PreviewListFirst FILES NEEDING COPY:"
+    $needed |
+        Sort-Object Status, RelativePath |
+        Select-Object -First $PreviewListFirst Status, SizeMB, LocalUtc, RelativePath, RemoteFile |
+        Format-Table -AutoSize
 
-[pscustomobject]@{
-    LocalRoot = $localRoot
-    RemoteRoot = $remoteRoot
-    TotalLocalFiles = $results.Count
-    MissingRemote = $missing.Count
-    LocalNewer = $newer.Count
-    RemoteUpToDate = $upToDate.Count
-    NeedsCopyTotal = $needed.Count
-    Preview = [bool]$Preview
-} | Format-List
+    ""
+    "TOP $PreviewTopLargest LARGEST FILES NEEDING COPY:"
+    $needed |
+        Sort-Object SizeBytes -Descending |
+        Select-Object -First $PreviewTopLargest Status, SizeMB, RelativePath, RemoteFile |
+        Format-Table -AutoSize
 
-""
-"FIRST $ListFirst FILES NEEDING COPY:"
-$needed |
-    Sort-Object Status, RelativePath |
-    Select-Object -First $ListFirst Status, SizeMB, LocalUtc, RelativePath, RemoteFile |
-    Format-Table -AutoSize
-
-""
-"TOP $TopLargest LARGEST FILES NEEDING COPY:"
-$needed |
-    Sort-Object SizeBytes -Descending |
-    Select-Object -First $TopLargest Status, SizeMB, RelativePath, RemoteFile |
-    Format-Table -AutoSize
-
-if ($Preview -or $needed.Count -eq 0) {
-    return
-}
-
-""
-"SYNCING FILES TO PHONE..."
-
-$copied = New-Object System.Collections.Generic.List[object]
-
-foreach ($item in $needed) {
-    $remoteDirectory = Get-RemoteDirectory -RemoteFile $item.RemoteFile
-    Ensure-RemoteDirectory -Serial $PinnedSerial -RemoteDirectory $remoteDirectory
-
-    Invoke-Adb -s $PinnedSerial push $item.LocalFile $item.RemoteFile | Out-Null
-
-    $remoteSize = Get-RemoteSize -Serial $PinnedSerial -RemoteFile $item.RemoteFile
-    if ($remoteSize -ne $item.SizeBytes) {
-        throw "Size verification failed for $($item.RelativePath): local=$($item.SizeBytes) remote=$remoteSize"
+    if ($IsPreview -or $needed.Count -eq 0) {
+        return
     }
 
-    $copied.Add([pscustomobject]@{
-        Status = $item.Status
-        SizeMB = $item.SizeMB
-        RelativePath = $item.RelativePath
-        RemoteFile = $item.RemoteFile
-    }) | Out-Null
+    ""
+    "SYNCING FILES TO PHONE..."
+
+    $copied = New-Object System.Collections.Generic.List[object]
+
+    foreach ($item in $needed) {
+        $remoteDirectory = Get-RemoteDirectory -RemoteFile $item.RemoteFile
+        Ensure-RemoteDirectory -Serial $Serial -RemoteDirectory $remoteDirectory
+
+        Invoke-Adb -s $Serial push $item.LocalFile $item.RemoteFile | Out-Null
+
+        $remoteSize = Get-RemoteSize -Serial $Serial -RemoteFile $item.RemoteFile
+        if ($remoteSize -ne $item.SizeBytes) {
+            throw "Size verification failed for $($item.RelativePath): local=$($item.SizeBytes) remote=$remoteSize"
+        }
+
+        $copied.Add([pscustomobject]@{
+            Status = $item.Status
+            SizeMB = $item.SizeMB
+            RelativePath = $item.RelativePath
+            RemoteFile = $item.RemoteFile
+        }) | Out-Null
+    }
+
+    ""
+    "SYNC COMPLETE:"
+    $copied | Format-Table -AutoSize
 }
 
-""
-"SYNC COMPLETE:"
-$copied | Format-Table -AutoSize
+if ($MyInvocation.InvocationName -ne '.') {
+    Invoke-SyncPhone `
+        -Serial $PinnedSerial `
+        -SourcePath $LocalPath `
+        -DestinationPath $RemotePath `
+        -PreviewListFirst $ListFirst `
+        -PreviewTopLargest $TopLargest `
+        -IsPreview ([bool]$Preview)
+}

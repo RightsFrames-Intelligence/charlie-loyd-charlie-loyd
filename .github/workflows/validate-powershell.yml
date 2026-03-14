@@ -44,3 +44,16 @@ jobs:
           if ($failed) {
               exit 1
           }
+
+      - name: Run PowerShell tests
+        shell: pwsh
+        run: |
+          $tests = Get-ChildItem -Path .\tests -Filter *.tests.ps1 -File
+          if (-not $tests) {
+              Write-Host "No PowerShell tests found."
+              exit 0
+          }
+
+          foreach ($test in $tests) {
+              & $test.FullName
+          }
