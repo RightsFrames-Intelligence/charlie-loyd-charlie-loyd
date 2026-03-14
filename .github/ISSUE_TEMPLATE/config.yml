@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: https://github.com/RightsFrames-Intelligence/charlie-loyd-charlie-loyd/security
+    about: Report vulnerabilities privately when GitHub security reporting is enabled.

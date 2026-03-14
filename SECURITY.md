@@ -1,21 +1,17 @@
 # Security Policy
 
-## Supported Versions
+## Reporting a vulnerability
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+If you find a security issue, do not open a public issue with exploit details.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+Instead:
 
-## Reporting a Vulnerability
+1. Use GitHub private vulnerability reporting if it is enabled for this repository.
+2. If private reporting is not available, contact the repository owners directly through GitHub.
 
-Use this section to tell people how to report a vulnerability.
+Include:
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+- A clear description of the issue
+- Steps to reproduce it
+- Impact and affected files or flows
+- Any proposed mitigation if you have one
