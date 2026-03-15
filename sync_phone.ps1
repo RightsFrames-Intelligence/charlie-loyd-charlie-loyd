@@ -11,11 +11,21 @@ $ErrorActionPreference = 'Stop'
 
 function Invoke-Adb {
     param(
+        [switch]$IgnoreExitCode,
         [Parameter(ValueFromRemainingArguments = $true)]
         [string[]]$Arguments
     )
 
-    & adb @Arguments
+    $global:LASTEXITCODE = 0
+    $output = & adb @Arguments
+    $exitCode = $LASTEXITCODE
+
+    if (-not $IgnoreExitCode -and $exitCode -ne 0) {
+        $commandLine = @('adb') + $Arguments
+        throw "adb exited with code ${exitCode}: $($commandLine -join ' ')"
+    }
+
+    return $output
 }
 
 function Test-AdbDevice {
@@ -52,7 +62,7 @@ function Get-RemoteStatValue {
     )
 
     foreach ($command in $commands) {
-        $value = (Invoke-Adb -s $Serial shell $command 2>$null | Out-String).Trim()
+        $value = (Invoke-Adb -IgnoreExitCode -s $Serial shell $command 2>$null | Out-String).Trim()
         if ($value) {
             return $value
         }
